@@ -1,13 +1,25 @@
 /* ==========================================================================
    VMMTC — English ⇄ Tamil language switcher
-   Dictionary-driven. Text nodes are matched against T and swapped to
-   formal, traditional Tirunelveli Tamil. State persists via localStorage.
+   Google's official website-translate widget is preferred (key-free).
+   The hand-maintained T dictionary below is kept as an offline / blocked
+   fallback. State persists via localStorage ("vmmtc.lang"); Google's widget
+   sets its own "googtrans" cookie, which we reconcile on every boot.
    ========================================================================== */
 (function () {
 	'use strict';
 
 	var LANG_KEY = 'vmmtc.lang';
 	var LANGS = ['en', 'ta'];
+
+	/* ---- Google website-translate widget ---- */
+	var GT_CALLBACK = 'GTranslateElementInit';
+	var GT_URL = 'https://translate.google.com/translate_a/element.js?cb=' + GT_CALLBACK;
+	var GT_TARGET = 'ta';
+	var WIDGET_TIMEOUT = 3500;
+	var TRANSLATE_TIMEOUT = 10000;
+	var widgetState = 'idle'; // 'idle' | 'loading' | 'ready' | 'failed'
+	var widgetBooted = false;
+	var bootReconciled = false;
 
 	/* ------------------------------------------------------------------
 	   Dictionary — key = exact (trimmed) English text from the site.
@@ -689,6 +701,7 @@
 		try { localStorage.setItem(LANG_KEY, l); } catch (e) {}
 	}
 
+	/* ---- Dictionary fallback engine (offline / widget blocked) ---- */
 	function skippedNode(node) {
 		for (var el = node.parentElement; el && el !== document.body; el = el.parentElement) {
 			if (el.getAttribute && el.getAttribute('data-no-i18n') !== null) return true;
@@ -725,7 +738,7 @@
 
 	var textNodes = null;
 
-	function walk(lang) {
+	function applyDictionary(lang) {
 		if (!textNodes) textNodes = collectNodes();
 		textNodes.forEach(function (n) {
 			if (lang === 'ta') translateNode(n);
@@ -767,22 +780,196 @@
 		});
 	}
 
+	/* ---- Google website-translate widget helpers ---- */
+	function markNotranslate(el) {
+		if (el && el.classList && !el.classList.contains('notranslate')) el.classList.add('notranslate');
+	}
+
+	/* Brand names, the switcher and dynamic lyric/gallery zones keep their
+	   own text (Google honours the "notranslate" class). */
+	function protectNotranslate() {
+		var sels = [
+			'[data-no-i18n]',
+			'#lyricsTitle',
+			'#lyricsText',
+			'#songNav',
+			'#masonry',
+			'#galleryCount'
+		].join(',');
+		Array.prototype.forEach.call(document.querySelectorAll(sels), markNotranslate);
+		if (!('MutationObserver' in window)) return;
+		var guard = '#lyricsTitle, #lyricsText, .song-btn';
+		new MutationObserver(function (mutations) {
+			mutations.forEach(function (m) {
+				Array.prototype.forEach.call(m.addedNodes, function (node) {
+					if (!node || node.nodeType !== 1) return;
+					if (node.matches && node.matches(guard)) markNotranslate(node);
+					if (node.querySelectorAll) {
+						Array.prototype.forEach.call(node.querySelectorAll(guard), markNotranslate);
+					}
+				});
+			});
+		}).observe(document.body, { childList: true, subtree: true });
+	}
+
+	function findCombo() {
+		return document.querySelector('select.goog-te-combo');
+	}
+
+	function widgetReady() {
+		return widgetState === 'ready' && !!findCombo();
+	}
+
+	function isTranslated() {
+		return document.documentElement.classList.contains('translated-ltr');
+	}
+
+	function triggerWidget(lang) {
+		var combo = findCombo();
+		if (!combo) return false;
+		combo.value = lang;
+		combo.dispatchEvent(new Event('change'));
+		return true;
+	}
+
+	function bootWidget() {
+		if (widgetBooted) return;
+		widgetBooted = true;
+		if (navigator.onLine === false) { widgetState = 'failed'; return; }
+		if (!document.querySelector('.lang-switch')) { widgetState = 'failed'; return; }
+		widgetState = 'loading';
+
+		var holder = document.createElement('div');
+		holder.id = 'google_translate_element';
+		holder.setAttribute('aria-hidden', 'true');
+		holder.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:0;overflow:hidden;';
+		document.body.appendChild(holder);
+
+		window[GT_CALLBACK] = function () {
+			try {
+				new google.translate.TranslateElement({
+					pageLanguage: 'en',
+					includedLanguages: GT_TARGET,
+					autoDisplay: false,
+					layout: google.translate.TranslateElement.InlineLayout.SIMPLE
+				}, 'google_translate_element');
+			} catch (e) {}
+		};
+
+		var s = document.createElement('script');
+		s.src = GT_URL;
+		s.async = true;
+		s.onload = function () {
+			window.setTimeout(function () {
+				if (findCombo()) widgetState = 'ready';
+				reconcileAfterBoot();
+			}, 150);
+		};
+		s.onerror = function () { widgetState = 'failed'; };
+		document.body.appendChild(s);
+
+		window.setTimeout(function () {
+			if (widgetState === 'loading') {
+				widgetState = findCombo() ? 'ready' : 'failed';
+				reconcileAfterBoot();
+			}
+		}, WIDGET_TIMEOUT);
+	}
+
+	/* Keep our localStorage state in charge, overriding Google's "googtrans"
+	   cookie whenever the two disagree after the widget boots. */
+	function reconcileAfterBoot() {
+		if (bootReconciled || !widgetReady()) return;
+		bootReconciled = true;
+		var desired = loadLang();
+		var translated = isTranslated();
+		if (desired === 'ta' && !translated) triggerWidget('ta');
+		else if (desired !== 'ta' && translated) triggerWidget('en');
+	}
+
+	function finishApply(lang) {
+		if (lang === 'ta') {
+			document.documentElement.setAttribute('data-lang', 'ta');
+			document.documentElement.classList.add('i18n-ready');
+		} else {
+			document.documentElement.removeAttribute('data-lang');
+			document.documentElement.classList.remove('i18n-ready');
+		}
+		setPageMeta(lang);
+		setActiveSegs(lang);
+		document.dispatchEvent(new CustomEvent('i18n:change', { detail: { lang: lang } }));
+	}
+
+	function finishWidget(lang, root) {
+		root.classList.remove('lang-switching');
+		finishApply(lang);
+	}
+
+	/* Google applies the translation asynchronously after the combo change;
+	   finalise once the <html> class tells us it is done (or a failsafe
+	   timer releases the fade regardless). */
+	var classObserver = null;
+	function watchTranslated() {
+		if (classObserver || !('MutationObserver' in window)) return;
+		var lastSeen = isTranslated();
+		classObserver = new MutationObserver(function () {
+			var now = isTranslated();
+			if (now === lastSeen) return;
+			lastSeen = now;
+			var lang = now ? 'ta' : 'en';
+			if (lang !== loadLang()) return;
+			finishWidget(lang, document.documentElement);
+		});
+		classObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+	}
+
+	function dictionaryApply(lang, root) {
+		applyDictionary(lang);
+		root.classList.remove('lang-switching');
+		finishApply(lang);
+	}
+
 	var applyToken = 0;
 	var SWITCH_MS = 220;
 
-	function doApply(lang) {
-		if (lang === 'ta') {
-			walk('ta');
-			setPageMeta('ta');
-			document.documentElement.classList.add('i18n-ready');
-		} else {
-			walk('en');
-			setPageMeta('en');
-			document.documentElement.classList.remove('i18n-ready');
-			document.documentElement.removeAttribute('data-lang');
+	function waitForWidget(cb) {
+		var started = Date.now();
+		(function poll() {
+			if (widgetState === 'ready' || widgetState === 'failed') { cb(widgetState === 'ready'); return; }
+			if (Date.now() - started > WIDGET_TIMEOUT) { widgetState = 'failed'; cb(false); return; }
+			window.setTimeout(poll, 100);
+		})();
+	}
+
+	function widgetApply(lang, root, token) {
+		watchTranslated();
+		if (!triggerWidget(lang)) { dictionaryApply(lang, root); return; }
+		var done = false;
+		var finish = function () {
+			if (done) return;
+			done = true;
+			if (token !== applyToken) return;
+			finishWidget(lang, root);
+		};
+		if (isTranslated() === (lang === 'ta')) {
+			window.setTimeout(finish, 80);
+			return;
 		}
-		setActiveSegs(lang);
-		document.dispatchEvent(new CustomEvent('i18n:change', { detail: { lang: lang } }));
+		window.setTimeout(finish, TRANSLATE_TIMEOUT);
+	}
+
+	function applyOne(lang, root, token) {
+		if (widgetState === 'loading') {
+			waitForWidget(function (ready) {
+				if (token !== applyToken) return;
+				if (ready) widgetApply(lang, root, token);
+				else dictionaryApply(lang, root);
+			});
+		} else if (widgetReady()) {
+			widgetApply(lang, root, token);
+		} else {
+			dictionaryApply(lang, root);
+		}
 	}
 
 	function apply(lang) {
@@ -791,8 +978,7 @@
 		root.classList.add('lang-switching');
 		window.setTimeout(function () {
 			if (token !== applyToken) return;
-			doApply(lang);
-			root.classList.remove('lang-switching');
+			applyOne(lang, root, token);
 		}, SWITCH_MS);
 	}
 
@@ -813,7 +999,9 @@
 	}
 
 	function init() {
+		protectNotranslate();
 		bindSwitches();
+		bootWidget();
 		if (loadLang() === 'ta') apply('ta');
 	}
 

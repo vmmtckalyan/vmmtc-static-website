@@ -65,6 +65,25 @@ html.lang-switching body {
 	opacity: 0;
 }
 
+/* ---- Google website-translate widget chrome ---- */
+.goog-te-banner-frame,
+.goog-te-balloon-frame,
+#goog-gt-tt {
+	display: none !important;
+}
+body {
+	top: 0 !important;
+}
+html.translated-ltr h1,
+html.translated-ltr h2,
+html.translated-ltr h3,
+html.translated-ltr h4 {
+	font-family: var(--font-serif);
+}
+html.translated-ltr body {
+	font-family: var(--font-sans);
+}
+
 body {
 	font-family: var(--font-sans);
 	background-color: var(--paper);
